@@ -1,0 +1,799 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NAME="${1:-one-n-done-blog}"
+echo "Scaffolding $NAME …"
+mkdir -p "$NAME"
+cd "$NAME"
+git init -q
+
+# ----------------------------------------
+# package.json & deps
+# ----------------------------------------
+npm init -y >/dev/null
+npm pkg set type="module" >/dev/null
+
+# Core deps
+npm i -D astro@latest typescript @types/node >/dev/null
+# Tailwind v4 (via postcss plugin)
+npm i -D postcss @tailwindcss/postcss >/dev/null
+# RSS helper
+npm i @astrojs/rss >/dev/null
+
+# Scripts
+npm pkg set scripts.dev="astro dev" >/dev/null
+npm pkg set scripts.build="astro build" >/dev/null
+npm pkg set scripts.preview="astro preview" >/dev/null
+
+# ----------------------------------------
+# project config
+# ----------------------------------------
+cat > .gitignore <<'EOF'
+node_modules
+dist
+.vscode
+.DS_Store
+.env*
+EOF
+
+cat > astro.config.mjs <<'EOF'
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+  site: 'https://your-domain.com', // TODO: set this! used for RSS & canonicals
+  trailingSlash: 'always',
+  vite: {
+    resolve: { alias: { '@': '/src' } }
+  }
+});
+EOF
+
+cat > tsconfig.json <<'EOF'
+{
+  "extends": "astro/tsconfigs/strict",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] }
+  }
+}
+EOF
+
+cat > postcss.config.js <<'EOF'
+export default {
+  plugins: {
+    '@tailwindcss/postcss': {}
+  }
+};
+EOF
+
+# optional Netlify file (static deploy)
+cat > netlify.toml <<'EOF'
+[build]
+  command = "npm run build"
+  publish = "dist"
+EOF
+
+mkdir -p public
+cat > public/_redirects <<'EOF'
+# legacy to blog root (example)
+# /old-blog/*  /blog/  301
+EOF
+
+# ----------------------------------------
+# src tree
+# ----------------------------------------
+mkdir -p src/{content,layouts,components,lib,pages/blog,styles}
+
+# Tailwind (v4 via @tailwindcss/postcss)
+cat > src/styles/global.css <<'EOF'
+@import "tailwindcss";
+
+:root {
+  --brand: #0a2a58;
+}
+
+html { color-scheme: light dark; }
+body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial; }
+a { text-underline-offset: 2px; }
+EOF
+
+# ----------------------------------------
+# Content collections config (STRICT TAXONOMY)
+# ----------------------------------------
+mkdir -p src/content/posts
+cat > src/content/config.ts <<'EOF'
+import { defineCollection, z } from 'astro:content';
+
+// Allowed values (STRICT)
+export const ALLOWED_CATEGORIES = [
+  "checklists","guides","tips","how-to","case-studies","client-stories",
+  "success-stories","testimonials","bond-back","end-of-lease","inspections",
+  "agent-requirements","eco-friendly","stain-removal","carpet-cleaning",
+  "steam-cleaning","moving-out","quick-clean","maintenance","standards",
+  "pricing","diy-vs-pro","before-after","room-by-room","appliance-cleaning",
+  "pet-friendly","product-tools","safety","real-estate"
+] as const;
+
+export const ALLOWED_TAGS = [
+  "bond-cleaning","bond-return","checklist","cleaning-tips","customer-reviews",
+  "eco-friendly","end-of-lease","environmental","green-cleaning","inspection",
+  "inspections","maintenance","moving-out","non-toxic","quick-clean",
+  "real-estate","rental-maintenance","rental","stain-removal","standards",
+  "steam-cleaning","success-stories","testimonials","carpet-cleaning",
+  "agent-requirements"
+] as const;
+
+export const ALLOWED_REGIONS = ["brisbane","ipswich","logan"] as const;
+
+const posts = defineCollection({
+  type: 'content',
+  schema: z.object({
+    title: z.string().min(1),
+    description: z.string().min(10),
+    publishDate: z.coerce.date(),
+    categories: z.array(z.enum(ALLOWED_CATEGORIES)).nonempty(),
+    tags: z.array(z.enum(ALLOWED_TAGS)).nonempty(),
+    region: z.enum(ALLOWED_REGIONS),
+    author: z.string().min(1),
+    draft: z.boolean().optional().default(false)
+  })
+});
+
+export const collections = { posts };
+EOF
+
+# ----------------------------------------
+# Base layout with canonical + JSON-LD
+# ----------------------------------------
+cat > src/layouts/BaseLayout.astro <<'EOF'
+---
+const { title = 'One N Done Blog', description = '', canonical = '' } = Astro.props;
+const site = Astro.site?.toString().replace(/\/$/, '') || '';
+const url = canonical ? (site + canonical) : (site + Astro.url.pathname);
+const org = {
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  name: "One N Done Bond Clean",
+  url: site || undefined
+};
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{title}</title>
+    {description && <meta name="description" content={description} />}
+    <link rel="canonical" href={url} />
+    <link rel="stylesheet" href="/src/styles/global.css" />
+    <script type="application/ld+json" set:html={JSON.stringify(org)} />
+  </head>
+  <body class="min-h-screen">
+    <main class="max-w-5xl mx-auto px-4 py-8">
+      <slot />
+    </main>
+  </body>
+</html>
+EOF
+
+# ----------------------------------------
+# Components
+# ----------------------------------------
+cat > src/components/PostCard.astro <<'EOF'
+---
+import type { CollectionEntry } from 'astro:content';
+const { post } = Astro.props as { post: CollectionEntry<'posts'> };
+const link = `/blog/${post.slug}/`;
+---
+<article class="border border-slate-200 rounded-xl p-4 hover:shadow-sm transition">
+  <h3 class="text-xl font-bold">
+    <a href={link} class="hover:text-sky-700">{post.data.title}</a>
+  </h3>
+  <p class="text-slate-600 mt-2">{post.data.description}</p>
+  <p class="text-slate-500 text-sm mt-2">
+    {post.data.publishDate.toISOString().split('T')[0]} • {post.data.region}
+  </p>
+</article>
+EOF
+
+cat > src/components/Pagination.astro <<'EOF'
+---
+const { page, totalPages, basePath } = Astro.props as {
+  page: number; totalPages: number; basePath: string;
+};
+// basePath examples:
+//   '/blog'            -> page 1 at /blog/ ; page 2 at /blog/2/
+//   '/blog/category/x' -> page 1 at /blog/category/x/ ; page 2 at /blog/category/x/2/
+const prevHref = page > 2 ? `${basePath}/${page-1}/` : basePath + '/';
+const nextHref = `${basePath}/${page+1}/`;
+---
+<nav class="flex items-center justify-between mt-8">
+  <a class={`px-3 py-2 rounded border ${page>1?'hover:bg-slate-50':'opacity-50 pointer-events-none'}`} href={page>1?prevHref:undefined}>← Prev</a>
+  <span class="text-sm text-slate-600">Page {page} of {totalPages}</span>
+  <a class={`px-3 py-2 rounded border ${page<totalPages?'hover:bg-slate-50':'opacity-50 pointer-events-none'}`} href={page<totalPages?nextHref:undefined}>Next →</a>
+</nav>
+EOF
+
+# ----------------------------------------
+# Blog utilities
+# ----------------------------------------
+cat > src/lib/blog.ts <<'EOF'
+import { getCollection, type CollectionEntry } from 'astro:content';
+
+export type Post = CollectionEntry<'posts'>;
+
+export async function getAllPosts() {
+  const all = await getCollection('posts', (p) => !p.data.draft);
+  return all.sort((a, b) => +b.data.publishDate - +a.data.publishDate);
+}
+
+export function paginate<T>(items: T[], perPage: number) {
+  const pages = Math.max(1, Math.ceil(items.length / perPage));
+  return { pages, slice: (n: number) => items.slice((n-1)*perPage, n*perPage) };
+}
+
+export function partitionBy<T extends Post>(items: T[], key: 'categories' | 'tags' | 'region') {
+  const map = new Map<string, T[]>();
+  for (const p of items) {
+    if (key === 'region') {
+      const k = p.data.region;
+      map.set(k, [...(map.get(k) || []), p]);
+    } else {
+      for (const k of p.data[key]) {
+        map.set(k, [...(map.get(k) || []), p]);
+      }
+    }
+  }
+  return map;
+}
+EOF
+
+# ----------------------------------------
+# PAGES: blog index + pagination
+# ----------------------------------------
+cat > src/pages/blog/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+
+const posts = await getAllPosts();
+const perPage = 10;
+const pager = paginate(posts, perPage);
+const page = 1;
+const items = pager.slice(page);
+const totalPages = pager.pages;
+
+const title = "Blog | One N Done Bond Clean";
+const description = "Guides, checklists, and tips for end-of-lease and bond cleaning.";
+const canonical = "/blog/";
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Blog</h1>
+
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+
+  {totalPages > 1 && (
+    <div class="mt-6 text-sm text-slate-600">
+      <a href="/blog/2/" class="underline hover:text-sky-700">Next page →</a>
+    </div>
+  )}
+</BaseLayout>
+EOF
+
+mkdir -p src/pages/blog/[page]
+cat > src/pages/blog/[page]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+import Pagination from '@/components/Pagination.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const perPage = 10;
+  const pages = Math.max(1, Math.ceil(posts.length / perPage));
+  // only generate pages beyond 1
+  return Array.from({ length: Math.max(0, pages - 1) }, (_, i) => ({
+    params: { page: String(i + 2) }
+  }));
+}
+
+const { page } = Astro.params;
+const n = Math.max(2, Number(page || 2));
+
+const posts = await getAllPosts();
+const perPage = 10;
+const pager = paginate(posts, perPage);
+const items = pager.slice(n);
+const totalPages = pager.pages;
+
+const title = `Blog — Page ${n} | One N Done Bond Clean`;
+const description = "Guides, checklists, and tips for end-of-lease and bond cleaning.";
+const canonical = `/blog/${n}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Blog — Page {n}</h1>
+
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+
+  <Pagination page={n} totalPages={totalPages} basePath="/blog" />
+</BaseLayout>
+EOF
+
+# ----------------------------------------
+# Category / Tag / Region listing + pagination
+# ----------------------------------------
+mkdir -p src/pages/blog/category/[category] src/pages/blog/category/[category]/[page]
+cat > src/pages/blog/category/[category]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate, partitionBy } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byCat = partitionBy(posts, 'categories');
+  return Array.from(byCat.keys()).map((category) => ({ params: { category } }));
+}
+
+const { category } = Astro.params;
+const posts = await getAllPosts();
+const byCat = partitionBy(posts, 'categories');
+const list = byCat.get(String(category)) || [];
+
+const perPage = 10;
+const pager = paginate(list, perPage);
+const items = pager.slice(1);
+const totalPages = pager.pages;
+
+const title = `Category: ${category} | One N Done Bond Clean`;
+const description = `Posts in category "${category}".`;
+const canonical = `/blog/category/${category}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Category: {category}</h1>
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+  {totalPages > 1 && (
+    <div class="mt-6 text-sm text-slate-600">
+      <a href={`/blog/category/${category}/2/`} class="underline hover:text-sky-700">Next page →</a>
+    </div>
+  )}
+</BaseLayout>
+EOF
+
+cat > src/pages/blog/category/[category]/[page]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate, partitionBy } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+import Pagination from '@/components/Pagination.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byCat = partitionBy(posts, 'categories');
+  const perPage = 10;
+  const paths = [];
+  for (const [category, list] of byCat) {
+    const pages = Math.max(1, Math.ceil(list.length / perPage));
+    for (let p = 2; p <= pages; p++) {
+      paths.push({ params: { category, page: String(p) } });
+    }
+  }
+  return paths;
+}
+
+const { category, page } = Astro.params;
+const n = Math.max(2, Number(page || 2));
+const posts = await getAllPosts();
+const byCat = partitionBy(posts, 'categories');
+const list = byCat.get(String(category)) || [];
+
+const perPage = 10;
+const pager = paginate(list, perPage);
+const items = pager.slice(n);
+const totalPages = pager.pages;
+
+const title = `Category: ${category} — Page ${n} | One N Done Bond Clean`;
+const description = `Posts in category "${category}".`;
+const canonical = `/blog/category/${category}/${n}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Category: {category} — Page {n}</h1>
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+  <Pagination page={n} totalPages={totalPages} basePath={`/blog/category/${category}`} />
+</BaseLayout>
+EOF
+
+mkdir -p src/pages/blog/tag/[tag] src/pages/blog/tag/[tag]/[page]
+cat > src/pages/blog/tag/[tag]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate, partitionBy } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byTag = partitionBy(posts, 'tags');
+  return Array.from(byTag.keys()).map((tag) => ({ params: { tag } }));
+}
+
+const { tag } = Astro.params;
+const posts = await getAllPosts();
+const byTag = partitionBy(posts, 'tags');
+const list = byTag.get(String(tag)) || [];
+
+const perPage = 10;
+const pager = paginate(list, perPage);
+const items = pager.slice(1);
+const totalPages = pager.pages;
+
+const title = `Tag: ${tag} | One N Done Bond Clean`;
+const description = `Posts tagged "${tag}".`;
+const canonical = `/blog/tag/${tag}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Tag: {tag}</h1>
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+  {totalPages > 1 && (
+    <div class="mt-6 text-sm text-slate-600">
+      <a href={`/blog/tag/${tag}/2/`} class="underline hover:text-sky-700">Next page →</a>
+    </div>
+  )}
+</BaseLayout>
+EOF
+
+cat > src/pages/blog/tag/[tag]/[page]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate, partitionBy } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+import Pagination from '@/components/Pagination.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byTag = partitionBy(posts, 'tags');
+  const perPage = 10;
+  const paths = [];
+  for (const [tag, list] of byTag) {
+    const pages = Math.max(1, Math.ceil(list.length / perPage));
+    for (let p = 2; p <= pages; p++) {
+      paths.push({ params: { tag, page: String(p) } });
+    }
+  }
+  return paths;
+}
+
+const { tag, page } = Astro.params;
+thePage: {
+}
+const n = Math.max(2, Number(page || 2));
+const posts = await getAllPosts();
+const byTag = partitionBy(posts, 'tags');
+const list = byTag.get(String(tag)) || [];
+
+const perPage = 10;
+const pager = paginate(list, perPage);
+const items = pager.slice(n);
+const totalPages = pager.pages;
+
+const title = `Tag: ${tag} — Page ${n} | One N Done Bond Clean`;
+const description = `Posts tagged "${tag}".`;
+const canonical = `/blog/tag/${tag}/${n}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Tag: {tag} — Page {n}</h1>
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+  <Pagination page={n} totalPages={totalPages} basePath={`/blog/tag/${tag}`} />
+</BaseLayout>
+EOF
+
+mkdir -p src/pages/blog/region/[region] src/pages/blog/region/[region]/[page]
+cat > src/pages/blog/region/[region]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate, partitionBy } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byRegion = partitionBy(posts, 'region');
+  return Array.from(byRegion.keys()).map((region) => ({ params: { region } }));
+}
+
+const { region } = Astro.params;
+const posts = await getAllPosts();
+const byRegion = partitionBy(posts, 'region');
+const list = byRegion.get(String(region)) || [];
+
+const perPage = 10;
+const pager = paginate(list, perPage);
+const items = pager.slice(1);
+const totalPages = pager.pages;
+
+const title = `Region: ${region} | One N Done Bond Clean`;
+const description = `Posts for region "${region}".`;
+const canonical = `/blog/region/${region}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Region: {region}</h1>
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+  {totalPages > 1 && (
+    <div class="mt-6 text-sm text-slate-600">
+      <a href={`/blog/region/${region}/2/`} class="underline hover:text-sky-700">Next page →</a>
+    </div>
+  )}
+</BaseLayout>
+EOF
+
+cat > src/pages/blog/region/[region]/[page]/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getAllPosts, paginate, partitionBy } from '@/lib/blog';
+import PostCard from '@/components/PostCard.astro';
+import Pagination from '@/components/Pagination.astro';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byRegion = partitionBy(posts, 'region');
+  const perPage = 10;
+  const paths = [];
+  for (const [region, list] of byRegion) {
+    const pages = Math.max(1, Math.ceil(list.length / perPage));
+    for (let p = 2; p <= pages; p++) {
+      paths.push({ params: { region, page: String(p) } });
+    }
+  }
+  return paths;
+}
+
+const { region, page } = Astro.params;
+const n = Math.max(2, Number(page || 2));
+const posts = await getAllPosts();
+const byRegion = partitionBy(posts, 'region');
+const list = byRegion.get(String(region)) || [];
+
+const perPage = 10;
+const pager = paginate(list, perPage);
+const items = pager.slice(n);
+const totalPages = pager.pages;
+
+const title = `Region: ${region} — Page ${n} | One N Done Bond Clean`;
+const description = `Posts for region "${region}".`;
+const canonical = `/blog/region/${region}/${n}/`;
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  <h1 class="text-3xl font-extrabold mb-6">Region: {region} — Page {n}</h1>
+  <div class="grid gap-6 md:grid-cols-2">
+    {items.map((post) => <PostCard post={post} />)}
+  </div>
+  <Pagination page={n} totalPages={totalPages} basePath={`/blog/region/${region}`} />
+</BaseLayout>
+EOF
+
+# ----------------------------------------
+# Single post page
+# ----------------------------------------
+cat > src/pages/blog/[slug].astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { getEntry, getCollection } from 'astro:content';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('posts', (p) => !p.data.draft);
+  return posts.map((p) => ({ params: { slug: p.slug } }));
+}
+
+const { slug } = Astro.params;
+const post = await getEntry('posts', String(slug));
+if (!post) {
+  Astro.response.status = 404;
+}
+const site = Astro.site?.toString().replace(/\/$/, '') || '';
+const canonical = `/blog/${slug}/`;
+const title = post ? `${post.data.title} | One N Done Bond Clean` : 'Not found';
+const description = post?.data.description || '';
+const ld = post && {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  headline: post.data.title,
+  datePublished: post.data.publishDate.toISOString(),
+  author: { "@type": "Person", name: post.data.author },
+  mainEntityOfPage: site + canonical,
+  about: post.data.categories
+};
+---
+<BaseLayout title={title} description={description} canonical={canonical}>
+  {post ? (
+    <>
+      <h1 class="text-3xl md:text-4xl font-extrabold mb-2">{post.data.title}</h1>
+      <p class="text-slate-600 mb-6">
+        {post.data.publishDate.toISOString().split('T')[0]} • {post.data.region}
+      </p>
+      <article class="prose max-w-none">
+        <Fragment set:html={post.body} />
+      </article>
+      <script type="application/ld+json" set:html={JSON.stringify(ld)} />
+    </>
+  ) : (
+    <p>Post not found.</p>
+  )}
+</BaseLayout>
+EOF
+
+# ----------------------------------------
+# RSS routes
+# ----------------------------------------
+mkdir -p src/pages/blog/category/[category] src/pages/blog/tag/[tag] src/pages/blog/region/[region]
+cat > src/pages/blog/rss.xml.ts <<'EOF'
+import { rss } from '@astrojs/rss';
+import { getAllPosts } from '@/lib/blog';
+
+export async function GET(context) {
+  const posts = await getAllPosts();
+  return rss({
+    title: 'One N Done Blog',
+    description: 'Guides, checklists, and tips.',
+    site: context.site,
+    items: posts.map((p) => ({
+      link: `/blog/${p.slug}/`,
+      title: p.data.title,
+      pubDate: p.data.publishDate,
+      description: p.data.description
+    }))
+  });
+}
+EOF
+
+cat > src/pages/blog/category/[category]/rss.xml.ts <<'EOF'
+import { rss } from '@astrojs/rss';
+import { getAllPosts, partitionBy } from '@/lib/blog';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byCat = partitionBy(posts, 'categories');
+  return Array.from(byCat.keys()).map((category) => ({ params: { category } }));
+}
+
+export async function GET({ params, site }) {
+  const posts = await getAllPosts();
+  const byCat = partitionBy(posts, 'categories');
+  const list = byCat.get(String(params.category)) || [];
+  return rss({
+    title: `Blog — ${params.category}`,
+    description: `Posts in category "${params.category}"`,
+    site,
+    items: list.map((p) => ({
+      link: `/blog/${p.slug}/`,
+      title: p.data.title,
+      pubDate: p.data.publishDate,
+      description: p.data.description
+    }))
+  });
+}
+EOF
+
+cat > src/pages/blog/tag/[tag]/rss.xml.ts <<'EOF'
+import { rss } from '@astrojs/rss';
+import { getAllPosts, partitionBy } from '@/lib/blog';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byTag = partitionBy(posts, 'tags');
+  return Array.from(byTag.keys()).map((tag) => ({ params: { tag } }));
+}
+
+export async function GET({ params, site }) {
+  const posts = await getAllPosts();
+  const byTag = partitionBy(posts, 'tags');
+  const list = byTag.get(String(params.tag)) || [];
+  return rss({
+    title: `Blog — ${params.tag}`,
+    description: `Posts tagged "${params.tag}"`,
+    site,
+    items: list.map((p) => ({
+      link: `/blog/${p.slug}/`,
+      title: p.data.title,
+      pubDate: p.data.publishDate,
+      description: p.data.description
+    }))
+  });
+}
+EOF
+
+cat > src/pages/blog/region/[region]/rss.xml.ts <<'EOF'
+import { rss } from '@astrojs/rss';
+import { getAllPosts, partitionBy } from '@/lib/blog';
+
+export async function getStaticPaths() {
+  const posts = await getAllPosts();
+  const byRegion = partitionBy(posts, 'region');
+  return Array.from(byRegion.keys()).map((region) => ({ params: { region } }));
+}
+
+export async function GET({ params, site }) {
+  const posts = await getAllPosts();
+  const byRegion = partitionBy(posts, 'region');
+  const list = byRegion.get(String(params.region)) || [];
+  return rss({
+    title: `Blog — ${params.region}`,
+    description: `Posts for region "${params.region}"`,
+    site,
+    items: list.map((p) => ({
+      link: `/blog/${p.slug}/`,
+      title: p.data.title,
+      pubDate: p.data.publishDate,
+      description: p.data.description
+    }))
+  });
+}
+EOF
+
+# ----------------------------------------
+# Example post
+# ----------------------------------------
+cat > src/content/posts/bond-cleaning-checklist.md <<'EOF'
+---
+title: "Bond Cleaning Checklist"
+description: "A concise inspection-ready checklist for your end-of-lease clean."
+publishDate: "2025-09-07"
+categories: ["checklists", "bond-back"]
+tags: ["checklist", "inspection"]
+region: "ipswich"
+author: "One N Done Bond Clean"
+---
+
+## Kitchen
+- Oven cleaned inside & out, including racks and glass
+- Cooktop & splashback degreased and polished
+
+## Bathroom
+- Shower screen, tiles & grout reset
+- Toilet (including hinges and base) detailed
+
+> Tip: Ensure power & water are on for the clean. Photos help us quote accurately.
+EOF
+
+# ----------------------------------------
+# Home page (link to blog)
+# ----------------------------------------
+cat > src/pages/index.astro <<'EOF'
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+---
+<BaseLayout title="One N Done Blog" description="Astro 5 + Tailwind v4 static blog">
+  <h1 class="text-3xl font-extrabold mb-4">One N Done Blog</h1>
+  <p class="text-slate-700">Browse our latest guides and checklists.</p>
+  <p class="mt-4"><a class="underline hover:text-sky-700" href="/blog/">Go to Blog →</a></p>
+</BaseLayout>
+EOF
+
+echo "✅ Done.
+
+Next:
+  cd $NAME
+  npm install
+  npm run dev   # open http://localhost:4321
+  # Try these once built:
+  #   /blog/
+  #   /blog/2/                (auto only if >10 posts)
+  #   /blog/category/checklists/
+  #   /blog/tag/checklist/
+  #   /blog/region/ipswich/
+  #   /blog/rss.xml
+  #   /blog/category/checklists/rss.xml
+"
